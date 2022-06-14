@@ -38,6 +38,8 @@ public class KillDemo {
                     executorService.submit(
                             () -> {
                                 countDownLatch.countDown();
+                                // 没有做等待
+                                countDownLatch.await(1, TimeUnit.SECONDS);
                                 return killDemo.operate(new UserRequest(orderId, userId, 1));
                             });
 
@@ -59,7 +61,7 @@ public class KillDemo {
 
     // 模拟数据库行
     private volatile Integer stock = 6;
-
+    // 合并队列
     private final BlockingDeque<RequestPromise> queue = new LinkedBlockingDeque<>(10);
 
     /**
@@ -68,19 +70,33 @@ public class KillDemo {
      * <pre>
      * TODO 阈值判断
      * TODO 队列创建</pre>
+     *
+     * synchronized 指向堆对象
+     *
+     * <p>当对象为局部变量（非原始类型）时，只有引用是局部的，而不是实际的对象本身。实际上在堆上其可以被许多其他线程访问。
+     *
+     * <p>因此，需要对对象进行同步，以便单个线程一次只能访问该对象。
+     *
+     * @see <a
+     *     href="https://stackoverflow.com/questions/43134998/is-it-reasonable-to-synchronize-on-a-local-variable">Is
+     *     it reasonable to synchronize on a local variable?</a>
      */
     public Result operate(UserRequest userRequest) throws InterruptedException {
         RequestPromise requestPromise = new RequestPromise(userRequest);
-        boolean enqueueSuccess = queue.offer(requestPromise, 100, TimeUnit.MILLISECONDS);
-        if (!enqueueSuccess) {
-            return new Result(false, "系统繁忙");
-        }
         synchronized (requestPromise) {
+            boolean enqueueSuccess = queue.offer(requestPromise, 100, TimeUnit.MILLISECONDS);
+            if (!enqueueSuccess) {
+                return new Result(false, "系统繁忙");
+            }
             try {
                 // 进队列成功后阻塞 200ms
                 requestPromise.wait(200);
+                // 等待超时不会抛出异常。结束时间之后，直接往下执行，返回null
+                if (requestPromise.getResult() == null) {
+                    return new Result(false, "等待超时");
+                }
             } catch (InterruptedException e) {
-                return new Result(false, "等待超时");
+                e.printStackTrace();
             }
         }
         return requestPromise.getResult();
@@ -100,8 +116,12 @@ public class KillDemo {
                             }
                         }
 
-                        while (queue.peek() != null) {
+                        /*while (queue.peek() != null) { // 如果生产端比消费端快，就会造成死循环
                             list.add(queue.poll());
+                        }*/
+                        int batchSize = queue.size();
+                        for (int i = 0; i < batchSize; i++) {
+                            list.add(queue.poll()); // poll 自动移除
                         }
 
                         System.out.println(Thread.currentThread().getName() + " 合并扣减库存: " + list);
@@ -126,11 +146,11 @@ public class KillDemo {
                             if (count <= stock) { // 库存: 1, 下单: {user1: 2, user2: 1}
                                 stock -= count;
                                 requestPromise.setResult(new Result(true, "ok"));
-                                synchronized (requestPromise) {
-                                    requestPromise.notify();
-                                }
                             } else {
                                 requestPromise.setResult(new Result(false, "库存不足"));
+                            }
+                            synchronized (requestPromise) { // 库存不足没有进行通知
+                                requestPromise.notify();
                             }
                         }
                         list.clear();
